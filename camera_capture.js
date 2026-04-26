@@ -35,11 +35,13 @@
       };
     }
 
-    saveFrame(args) {
+    async saveFrame(args) {
       const provider =
         this.runtime.ioDevices.video &&
         this.runtime.ioDevices.video.provider;
       const video = provider && provider.video;
+
+      console.log("[摄像头截图] video:", video, "videoWidth:", video && video.videoWidth);
 
       if (!video || !video.videoWidth) {
         console.warn("[摄像头截图] 摄像头未开启或不可用");
@@ -52,20 +54,19 @@
       const ctx = canvas.getContext("2d");
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      canvas.toBlob(
-        (blob) => {
-          if (!blob) return;
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = args.FILENAME || "capture.png";
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          setTimeout(() => URL.revokeObjectURL(url), 1000);
-        },
-        "image/png"
-      );
+      console.log("[摄像头截图] canvas:", canvas.width, "x", canvas.height);
+
+      const dataURL = canvas.toDataURL("image/png");
+      const filename = args.FILENAME || "capture.png";
+
+      console.log("[摄像头截图] dataURL length:", dataURL.length, "filename:", filename);
+
+      try {
+        await Scratch.download(dataURL, filename);
+        console.log("[摄像头截图] 下载完成");
+      } catch (e) {
+        console.error("[摄像头截图] 下载失败:", e);
+      }
     }
   }
 
