@@ -183,7 +183,9 @@
       navigator.mediaDevices
         .getUserMedia({ audio: true })
         .then((stream) => {
-          this.mediaRecorder = new MediaRecorder(stream);
+          this.mediaRecorder = new MediaRecorder(stream, {
+            mimeType: "audio/webm;codecs=opus",
+          });
           this.mediaRecorder.ondataavailable = (e) => {
             if (e.data.size > 0) this.audioChunks.push(e.data);
           };
@@ -215,44 +217,60 @@
         const tracks = this.mediaRecorder.stream.getTracks();
         tracks.forEach((t) => t.stop());
 
-        const audioBlob = new Blob(this.audioChunks, {
-          type: "audio/webm",
-        });
+        const audioBlob = new Blob(this.audioChunks, { type: "audio/webm" });
         this.audioChunks = [];
 
-        const reader = new FileReader();
-        reader.onload = () => {
-          const base64Audio = reader.result.split(",")[1];
-          this._callSTT(apiKey, base64Audio);
-        };
-        reader.readAsDataURL(audioBlob);
+        this._callSTT(apiKey, audioBlob);
       };
 
       this.mediaRecorder.stop();
     }
 
-    _callSTT(apiKey, base64Audio) {
-      const body = {
-        model: "paraformer-v2",
-        input: {
-          audio: base64Audio,
-        },
-        parameters: {
-          format: "webm",
-        },
-      };
-
+    _callSTT(apiKey, audioBlob) {
+      // Step 1: 申请上传策略
       Scratch.fetch(
-        "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
+        "https://dashscope.aliyuncs.com/api/v1/uploads?model=paraformer-v2&filename=audio.webm",
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
           },
-          body: JSON.stringify(body),
         }
       )
+        .then((r) => {
+          if (!r.ok) return r.text().then((t) => Promise.reject(t));
+          return r.json();
+        })
+        .then((uploadData) => {
+          const uploadUrl = uploadData.data.upload_url;
+          const audioUrl = uploadData.data.url;
+
+          // Step 2: PUT 上传音频文件
+          return Scratch.fetch(uploadUrl, {
+            method: "PUT",
+            headers: { "Content-Type": "audio/webm" },
+            body: audioBlob,
+          }).then(() => audioUrl);
+        })
+        .then((audioUrl) => {
+          // Step 3: 调用 ASR 识别
+          const body = {
+            model: "paraformer-v2",
+            input: { audio: audioUrl },
+          };
+
+          return Scratch.fetch(
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify(body),
+            }
+          );
+        })
         .then((r) => {
           if (!r.ok) return r.text().then((t) => Promise.reject(t));
           return r.json();
@@ -264,10 +282,11 @@
             data.output.results[0] &&
             data.output.results[0].transcription;
           if (text) {
-            const fullText = Array.isArray(text)
-              ? text.map((t) => t.text).join("")
-              : text;
-            this.lastSTT = fullText;
+            this.lastSTT = typeof text === "string"
+              ? text
+              : text.map((t) => t.text).join("");
+          } else if (data.output && data.output.text) {
+            this.lastSTT = data.output.text;
           } else {
             this.lastSTT = "[错误：语音识别无结果]";
           }
