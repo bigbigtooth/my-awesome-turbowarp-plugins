@@ -1,6 +1,6 @@
 // Name: 百炼大模型
 // ID: dashscopeAI
-// Description: 调用阿里百炼大模型 API（通义千问）进行对话
+// Description: 调用阿里百炼大模型 API（通义千问），支持文字对话、语音识别、语音合成
 // License: MIT
 
 (function (Scratch) {
@@ -13,6 +13,12 @@
   class DashscopeAI {
     constructor() {
       this.lastReply = "";
+      this.lastSTT = "";
+      this.audioCtx = null;
+      this.mediaRecorder = null;
+      this.audioChunks = [];
+      this.isRecording = false;
+      this.currentAudio = null;
     }
 
     getInfo() {
@@ -23,6 +29,7 @@
         color2: "#E55D00",
         color3: "#CC5200",
         blocks: [
+          // --- LLM 对话 ---
           {
             opcode: "whenReplyReceived",
             blockType: Scratch.BlockType.EVENT,
@@ -34,10 +41,7 @@
             blockType: Scratch.BlockType.COMMAND,
             text: "使用 API Key [KEY] 向模型 [MODEL] 提问 [QUESTION]",
             arguments: {
-              KEY: {
-                type: Scratch.ArgumentType.STRING,
-                defaultValue: "",
-              },
+              KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
               MODEL: {
                 type: Scratch.ArgumentType.STRING,
                 defaultValue: "qwen-plus",
@@ -53,13 +57,69 @@
             blockType: Scratch.BlockType.REPORTER,
             text: "大模型的回答",
           },
+          "---",
+          // --- 语音识别 (STT) ---
+          {
+            opcode: "whenSTTReceived",
+            blockType: Scratch.BlockType.EVENT,
+            text: "当语音识别完成时",
+            isEdgeActivated: false,
+          },
+          {
+            opcode: "startRecording",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "开始录音",
+          },
+          {
+            opcode: "stopRecordingAndRecognize",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "停止录音并使用 API Key [KEY] 识别语音",
+            arguments: {
+              KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
+            },
+          },
+          {
+            opcode: "getSTT",
+            blockType: Scratch.BlockType.REPORTER,
+            text: "语音识别结果",
+          },
+          "---",
+          // --- 语音合成 (TTS) ---
+          {
+            opcode: "whenTTSReady",
+            blockType: Scratch.BlockType.EVENT,
+            text: "当语音合成完成时",
+            isEdgeActivated: false,
+          },
+          {
+            opcode: "speak",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "使用 API Key [KEY] 将 [TEXT] 合成为语音",
+            arguments: {
+              KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
+              TEXT: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "你好，世界！",
+              },
+            },
+          },
+          {
+            opcode: "playTTS",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "播放合成语音",
+          },
+          {
+            opcode: "stopTTS",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "停止播放语音",
+          },
         ],
       };
     }
 
-    whenReplyReceived() {
-      // HAT block — triggered by _emitReply
-    }
+    // ============ LLM 对话 ============
+
+    whenReplyReceived() {}
 
     ask(args) {
       const apiKey = args.KEY.trim();
@@ -68,7 +128,7 @@
 
       if (!apiKey) {
         this.lastReply = "[错误：API Key 为空]";
-        this._emitReply();
+        this._emit("whenReplyReceived");
         return;
       }
 
@@ -105,17 +165,208 @@
         .catch((err) => {
           this.lastReply = `[请求失败：${err}]`;
         })
-        .finally(() => {
-          this._emitReply();
-        });
+        .finally(() => this._emit("whenReplyReceived"));
     }
 
     getReply() {
       return this.lastReply;
     }
 
-    _emitReply() {
-      Scratch.vm.runtime.startHats("dashscopeAI_whenReplyReceived");
+    // ============ 语音识别 (STT) ============
+
+    whenSTTReceived() {}
+
+    startRecording() {
+      if (this.isRecording) return;
+      this.audioChunks = [];
+
+      navigator.mediaDevices
+        .getUserMedia({ audio: true })
+        .then((stream) => {
+          this.mediaRecorder = new MediaRecorder(stream);
+          this.mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) this.audioChunks.push(e.data);
+          };
+          this.mediaRecorder.start();
+          this.isRecording = true;
+        })
+        .catch((err) => {
+          this.lastSTT = `[录音失败：${err.message}]`;
+          this._emit("whenSTTReceived");
+        });
+    }
+
+    stopRecordingAndRecognize(args) {
+      const apiKey = args.KEY.trim();
+
+      if (!this.isRecording || !this.mediaRecorder) {
+        this.lastSTT = "[错误：未在录音中]";
+        this._emit("whenSTTReceived");
+        return;
+      }
+      if (!apiKey) {
+        this.lastSTT = "[错误：API Key 为空]";
+        this._emit("whenSTTReceived");
+        return;
+      }
+
+      this.mediaRecorder.onstop = () => {
+        this.isRecording = false;
+        const tracks = this.mediaRecorder.stream.getTracks();
+        tracks.forEach((t) => t.stop());
+
+        const audioBlob = new Blob(this.audioChunks, {
+          type: "audio/webm",
+        });
+        this.audioChunks = [];
+
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64Audio = reader.result.split(",")[1];
+          this._callSTT(apiKey, base64Audio);
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+
+      this.mediaRecorder.stop();
+    }
+
+    _callSTT(apiKey, base64Audio) {
+      const body = {
+        model: "paraformer-v2",
+        input: {
+          audio: base64Audio,
+        },
+        parameters: {
+          format: "webm",
+        },
+      };
+
+      Scratch.fetch(
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }
+      )
+        .then((r) => {
+          if (!r.ok) return r.text().then((t) => Promise.reject(t));
+          return r.json();
+        })
+        .then((data) => {
+          const text =
+            data.output &&
+            data.output.results &&
+            data.output.results[0] &&
+            data.output.results[0].transcription;
+          if (text) {
+            const fullText = Array.isArray(text)
+              ? text.map((t) => t.text).join("")
+              : text;
+            this.lastSTT = fullText;
+          } else {
+            this.lastSTT = "[错误：语音识别无结果]";
+          }
+        })
+        .catch((err) => {
+          this.lastSTT = `[识别失败：${err}]`;
+        })
+        .finally(() => this._emit("whenSTTReceived"));
+    }
+
+    getSTT() {
+      return this.lastSTT;
+    }
+
+    // ============ 语音合成 (TTS) ============
+
+    whenTTSReady() {}
+
+    speak(args) {
+      const apiKey = args.KEY.trim();
+      const text = args.TEXT;
+
+      if (!apiKey) {
+        this.lastReply = "[错误：API Key 为空]";
+        return;
+      }
+      if (!text) return;
+
+      const body = {
+        model: "cosyvoice-v2",
+        input: { text: text },
+        parameters: {
+          voice: "longxiaochun",
+          format: "mp3",
+        },
+      };
+
+      Scratch.fetch(
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2audio/generation",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "X-DashScope-DataInspection": "enable",
+          },
+          body: JSON.stringify(body),
+        }
+      )
+        .then((r) => {
+          if (!r.ok) return r.text().then((t) => Promise.reject(t));
+          return r.arrayBuffer();
+        })
+        .then((buffer) => {
+          this._ttsBuffer = buffer;
+          this._emit("whenTTSReady");
+        })
+        .catch((err) => {
+          console.error("[百炼TTS] 合成失败:", err);
+        });
+    }
+
+    playTTS() {
+      if (!this._ttsBuffer) return;
+
+      this.stopTTS();
+
+      if (!this.audioCtx) {
+        this.audioCtx = new (window.AudioContext ||
+          window.webkitAudioContext)();
+      }
+
+      this.audioCtx
+        .decodeAudioData(this._ttsBuffer.slice(0))
+        .then((audioBuffer) => {
+          const source = this.audioCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(this.audioCtx.destination);
+          source.start(0);
+          this.currentAudio = source;
+        })
+        .catch((err) => {
+          console.error("[百炼TTS] 播放失败:", err);
+        });
+    }
+
+    stopTTS() {
+      if (this.currentAudio) {
+        try {
+          this.currentAudio.stop();
+        } catch (_) {}
+        this.currentAudio = null;
+      }
+    }
+
+    // ============ 工具方法 ============
+
+    _emit(opcode) {
+      Scratch.vm.runtime.startHats(`dashscopeAI_${opcode}`);
     }
   }
 
