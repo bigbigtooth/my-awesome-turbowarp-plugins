@@ -232,9 +232,10 @@
       formData.append("model", "paraformer-v2");
       formData.append("file", audioBlob, "recording.webm");
 
-      console.log("[百炼STT] 使用 OpenAI 兼容接口发送识别请求");
+      console.log("[百炼STT] 使用原生 fetch + FormData 发送识别请求");
+      console.log("[百炼STT] audioBlob size:", audioBlob.size, "type:", audioBlob.type);
 
-      Scratch.fetch(
+      fetch(
         "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
         {
           method: "POST",
