@@ -1,7 +1,6 @@
 class CameraCaptureExtension {
   constructor(runtime) {
     this.runtime = runtime;
-    this.videoElement = null;
   }
 
   getInfo() {
@@ -10,14 +9,9 @@ class CameraCaptureExtension {
       name: '摄像头截图',
       blocks: [
         {
-          opcode: 'captureFrame',
-          blockType: Scratch.BlockType.COMMAND,
-          text: '捕获当前帧',
-        },
-        {
           opcode: 'saveFrame',
           blockType: Scratch.BlockType.COMMAND,
-          text: '保存帧为 [FILENAME]',
+          text: '保存摄像头画面为 [FILENAME]',
           arguments: {
             FILENAME: {
               type: Scratch.ArgumentType.STRING,
@@ -29,29 +23,33 @@ class CameraCaptureExtension {
     };
   }
 
-  captureFrame() {
-    const video = this.runtime.ioDevices.video.videoElement;
-    if (video) {
-      this.videoElement = video;
+  _getVideo() {
+    const provider = this.runtime.ioDevices.video.provider;
+    if (provider && provider.video) {
+      return provider.video;
     }
+    return null;
   }
 
   saveFrame(args) {
-    if (this.videoElement) {
-      const canvas = document.createElement('canvas');
-      canvas.width = this.videoElement.width;
-      canvas.height = this.videoElement.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(this.videoElement, 0, 0, canvas.width, canvas.height);
-      
-      const filename = args.FILENAME;
-      const link = document.createElement('a');
-      link.href = canvas.toDataURL('image/png');
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+    const video = this._getVideo();
+    if (!video) {
+      console.warn('[摄像头截图] 摄像头未开启或不可用');
+      return;
     }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const link = document.createElement('a');
+    link.href = canvas.toDataURL('image/png');
+    link.download = args.FILENAME;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 }
 
