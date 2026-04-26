@@ -1,6 +1,6 @@
 // Name: 百炼大模型
 // ID: dashscopeAI
-// Description: 调用阿里百炼大模型 API（通义千问），支持文字对话、语音识别、语音合成
+// Description: 调用阿里百炼大模型 API（通义千问），支持文字对话、图片理解、语音识别、语音合成
 // License: MIT
 
 (function (Scratch) {
@@ -13,6 +13,8 @@
   class DashscopeAI {
     constructor() {
       this.lastReply = "";
+      this.lastVisionReply = "";
+      this.lastCameraFrameDataUrl = "";
       this.lastSTT = "";
       this.audioCtx = null;
       this.mediaRecorder = null;
@@ -56,6 +58,62 @@
             opcode: "getReply",
             blockType: Scratch.BlockType.REPORTER,
             text: "大模型的回答",
+          },
+          "---",
+          // --- 图片理解 / 摄像头 ---
+          {
+            opcode: "whenVisionReplyReceived",
+            blockType: Scratch.BlockType.EVENT,
+            text: "当图片理解完成时",
+            isEdgeActivated: false,
+          },
+          {
+            opcode: "saveCameraFrame",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "保存摄像头画面为 [FILENAME]",
+            arguments: {
+              FILENAME: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "capture.png",
+              },
+            },
+          },
+          {
+            opcode: "askWithCameraFrame",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "使用 API Key [KEY] 向视觉模型 [MODEL] 发送摄像头画面并提问 [PROMPT]",
+            arguments: {
+              KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
+              MODEL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "qwen3.6-flash",
+              },
+              PROMPT: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "请描述这张图片里的内容。",
+              },
+            },
+          },
+          {
+            opcode: "askWithSavedCameraFrame",
+            blockType: Scratch.BlockType.COMMAND,
+            text: "使用 API Key [KEY] 向视觉模型 [MODEL] 发送最近一次保存的图片并提问 [PROMPT]",
+            arguments: {
+              KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
+              MODEL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "qwen3.6-flash",
+              },
+              PROMPT: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: "请描述刚才保存的图片内容。",
+              },
+            },
+          },
+          {
+            opcode: "getVisionReply",
+            blockType: Scratch.BlockType.REPORTER,
+            text: "图片理解结果",
           },
           "---",
           // --- 语音识别 (STT) ---
@@ -140,27 +198,9 @@
         ],
       };
 
-      Scratch.fetch(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(body),
-        }
-      )
+      this._requestChatCompletion(apiKey, body)
         .then((r) => {
-          if (!r.ok) return r.text().then((t) => Promise.reject(t));
-          return r.json();
-        })
-        .then((data) => {
-          if (data.choices && data.choices.length > 0) {
-            this.lastReply = data.choices[0].message.content;
-          } else {
-            this.lastReply = "[错误：API 未返回有效回复]";
-          }
+          this.lastReply = this._extractMessageText(r) || "[错误：API 未返回有效回复]";
         })
         .catch((err) => {
           this.lastReply = `[请求失败：${err}]`;
@@ -170,6 +210,82 @@
 
     getReply() {
       return this.lastReply;
+    }
+
+    // ============ 图片理解 / 摄像头 ============
+
+    whenVisionReplyReceived() {}
+
+    saveCameraFrame(args) {
+      let frameDataUrl;
+
+      try {
+        frameDataUrl = this._captureAndStoreCameraFrame({
+          format: "image/png",
+        });
+      } catch (err) {
+        console.warn("[百炼视觉] 保存摄像头画面失败:", err);
+        return;
+      }
+
+      const filename = args.FILENAME || "capture.png";
+      Promise.resolve(Scratch.download(frameDataUrl, filename))
+        .then(() => {
+          console.log("[百炼视觉] 摄像头画面已保存:", filename);
+        })
+        .catch((err) => {
+          console.error("[百炼视觉] 保存摄像头画面失败:", err);
+        });
+    }
+
+    askWithCameraFrame(args) {
+      const apiKey = args.KEY.trim();
+      const model = args.MODEL.trim();
+      const prompt = args.PROMPT;
+
+      if (!apiKey) {
+        this.lastVisionReply = "[错误：API Key 为空]";
+        this._emit("whenVisionReplyReceived");
+        return;
+      }
+
+      try {
+        const imageDataUrl = this._captureAndStoreCameraFrame({
+          format: "image/jpeg",
+          quality: 0.85,
+          maxDimension: 1024,
+        });
+        this._requestVision(apiKey, model, prompt, imageDataUrl)
+          .finally(() => this._emit("whenVisionReplyReceived"));
+      } catch (err) {
+        this.lastVisionReply = `[图片理解失败：${err.message || err}]`;
+        this._emit("whenVisionReplyReceived");
+      }
+    }
+
+    askWithSavedCameraFrame(args) {
+      const apiKey = args.KEY.trim();
+      const model = args.MODEL.trim();
+      const prompt = args.PROMPT;
+
+      if (!apiKey) {
+        this.lastVisionReply = "[错误：API Key 为空]";
+        this._emit("whenVisionReplyReceived");
+        return;
+      }
+
+      if (!this.lastCameraFrameDataUrl) {
+        this.lastVisionReply = "[错误：还没有可发送的图片，请先保存摄像头画面或先发送一次当前画面]";
+        this._emit("whenVisionReplyReceived");
+        return;
+      }
+
+      this._requestVision(apiKey, model, prompt, this.lastCameraFrameDataUrl)
+        .finally(() => this._emit("whenVisionReplyReceived"));
+    }
+
+    getVisionReply() {
+      return this.lastVisionReply;
     }
 
     // ============ 语音识别 (STT) ============
@@ -185,9 +301,10 @@
         .getUserMedia({ audio: true })
         .then((stream) => {
           console.log("[百炼STT] getUserMedia 成功, stream tracks:", stream.getTracks().length);
-          this.mediaRecorder = new MediaRecorder(stream, {
-            mimeType: "audio/webm;codecs=opus",
-          });
+          const mimeType = this._getRecordingMimeType();
+          this.mediaRecorder = mimeType
+            ? new MediaRecorder(stream, { mimeType })
+            : new MediaRecorder(stream);
           console.log("[百炼STT] MediaRecorder 创建成功, mimeType:", this.mediaRecorder.mimeType);
           this.mediaRecorder.ondataavailable = (e) => {
             console.log("[百炼STT] ondataavailable, chunk size:", e.data.size);
@@ -226,7 +343,9 @@
         tracks.forEach((t) => t.stop());
         console.log("[百炼STT] 录音已停止, audioChunks数量:", this.audioChunks.length);
 
-        const audioBlob = new Blob(this.audioChunks, { type: "audio/webm" });
+        const recordedMimeType =
+          this.mediaRecorder.mimeType || this._getRecordingMimeType() || "audio/webm";
+        const audioBlob = new Blob(this.audioChunks, { type: recordedMimeType });
         this.audioChunks = [];
 
         console.log("[百炼STT] 音频 Blob 大小:", audioBlob.size, "类型:", audioBlob.type);
@@ -246,45 +365,52 @@
     }
 
     _callSTT(apiKey, audioBlob) {
-      const formData = new FormData();
-      formData.append("model", "paraformer-v2");
-      formData.append("file", audioBlob, "recording.webm");
-
-      const url = "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions";
+      const url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
       console.log("[百炼STT] ========== 开始发送识别请求 ==========");
       console.log("[百炼STT] URL:", url);
       console.log("[百炼STT] Method: POST");
       console.log("[百炼STT] audioBlob size:", audioBlob.size, "type:", audioBlob.type);
-      console.log("[百炼STT] FormData model: paraformer-v2");
-      console.log("[百炼STT] FormData file: recording.webm");
+      console.log("[百炼STT] model: qwen3-asr-flash");
       console.log("[百炼STT] Authorization: Bearer " + apiKey.substring(0, 8) + "...");
 
-      fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: formData,
-      })
-        .then((r) => {
-          console.log("[百炼STT] 收到响应, 状态码:", r.status, "状态文本:", r.statusText);
-          console.log("[百炼STT] 响应头 Content-Type:", r.headers.get("content-type"));
-          if (!r.ok) {
-            return r.text().then((t) => {
-              console.error("[百炼STT] 错误响应体:", t);
-              return Promise.reject(t);
-            });
+      this._blobToDataUrl(audioBlob)
+        .then((dataUrl) => {
+          if (dataUrl.length > 10 * 1024 * 1024) {
+            throw new Error("录音过大，请将录音控制在约 5 分钟内并尽量简短");
           }
-          return r.json();
+
+          const body = {
+            model: "qwen3-asr-flash",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "input_audio",
+                    input_audio: {
+                      data: dataUrl,
+                    },
+                  },
+                ],
+              },
+            ],
+            stream: false,
+            asr_options: {
+              enable_itn: false,
+            },
+          };
+
+          return this._requestChatCompletion(apiKey, body);
         })
         .then((data) => {
           console.log("[百炼STT] 成功响应数据:", JSON.stringify(data));
-          if (data.text) {
-            this.lastSTT = data.text;
+          const text = this._extractASRText(data);
+          if (text) {
+            this.lastSTT = text;
             console.log("[百炼STT] 识别结果:", this.lastSTT);
           } else {
             this.lastSTT = "[错误：语音识别无结果]";
-            console.warn("[百炼STT] 响应中没有 text 字段");
+            console.warn("[百炼STT] 响应中没有可用识别文本");
           }
         })
         .catch((err) => {
@@ -386,6 +512,167 @@
 
     _emit(opcode) {
       Scratch.vm.runtime.startHats(`dashscopeAI_${opcode}`);
+    }
+
+    _requestChatCompletion(apiKey, body) {
+      return Scratch.fetch(
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }
+      ).then((r) => {
+        if (!r.ok) {
+          return r.text().then((t) => Promise.reject(t));
+        }
+        return r.json();
+      });
+    }
+
+    _requestVision(apiKey, model, prompt, imageDataUrl) {
+      const body = {
+        model: model || "qwen3.6-flash",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: {
+                  url: imageDataUrl,
+                },
+              },
+              {
+                type: "text",
+                text: prompt || "请描述这张图片里的内容。",
+              },
+            ],
+          },
+        ],
+      };
+
+      return this._requestChatCompletion(apiKey, body)
+        .then((data) => {
+          const text = this._extractMessageText(data);
+          this.lastVisionReply = text || "[错误：图片理解无结果]";
+        })
+        .catch((err) => {
+          this.lastVisionReply = `[图片理解失败：${err}]`;
+        });
+    }
+
+    _getCameraVideo() {
+      const runtime = Scratch.vm && Scratch.vm.runtime;
+      const provider =
+        runtime &&
+        runtime.ioDevices.video &&
+        runtime.ioDevices.video.provider;
+      return provider && provider.video;
+    }
+
+    _captureCameraFrame(options) {
+      const settings = options || {};
+      const video = this._getCameraVideo();
+
+      if (!video || !video.videoWidth || !video.videoHeight) {
+        throw new Error("摄像头未开启或不可用");
+      }
+
+      const maxDimension = settings.maxDimension || 0;
+      const scale =
+        maxDimension > 0
+          ? Math.min(1, maxDimension / Math.max(video.videoWidth, video.videoHeight))
+          : 1;
+      const width = Math.max(1, Math.round(video.videoWidth * scale));
+      const height = Math.max(1, Math.round(video.videoHeight * scale));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        throw new Error("无法创建画布");
+      }
+
+      ctx.drawImage(video, 0, 0, width, height);
+
+      return canvas.toDataURL(
+        settings.format || "image/png",
+        typeof settings.quality === "number" ? settings.quality : undefined
+      );
+    }
+
+    _captureAndStoreCameraFrame(options) {
+      const dataUrl = this._captureCameraFrame(options);
+      this.lastCameraFrameDataUrl = dataUrl;
+      return dataUrl;
+    }
+
+    _getRecordingMimeType() {
+      const preferredTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+      ];
+
+      if (typeof MediaRecorder === "undefined") return "";
+      if (typeof MediaRecorder.isTypeSupported !== "function") return preferredTypes[0];
+
+      return preferredTypes.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+    }
+
+    _blobToDataUrl(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          if (typeof reader.result === "string") {
+            resolve(reader.result);
+            return;
+          }
+          reject(new Error("音频编码失败"));
+        };
+        reader.onerror = () => reject(reader.error || new Error("音频编码失败"));
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    _extractASRText(data) {
+      if (!data || !data.choices || !data.choices.length) return "";
+      const message = data.choices[0].message;
+      if (!message) return "";
+      if (typeof message.content === "string") return message.content;
+      if (!Array.isArray(message.content)) return "";
+
+      return message.content
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item.text === "string") return item.text;
+          return "";
+        })
+        .join("")
+        .trim();
+    }
+
+    _extractMessageText(data) {
+      if (!data || !data.choices || !data.choices.length) return "";
+      const message = data.choices[0].message;
+      if (!message) return "";
+      if (typeof message.content === "string") return message.content;
+      if (!Array.isArray(message.content)) return "";
+
+      return message.content
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item.text === "string") return item.text;
+          return "";
+        })
+        .join("")
+        .trim();
     }
   }
 
