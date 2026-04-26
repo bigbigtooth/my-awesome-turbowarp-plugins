@@ -217,65 +217,54 @@
         const tracks = this.mediaRecorder.stream.getTracks();
         tracks.forEach((t) => t.stop());
 
-        const audioBlob = new Blob(this.audioChunks, { type: "audio/webm" });
+        const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
         this.audioChunks = [];
 
-        this._callSTT(apiKey, audioBlob);
+        const reader = new FileReader();
+        reader.onload = () => {
+          // data:audio/wav;base64,xxxxx
+          const dataURL = reader.result;
+          console.log("[百炼STT] 音频 dataURL 长度:", dataURL.length);
+          this._callSTT(apiKey, dataURL);
+        };
+        reader.onerror = () => {
+          this.lastSTT = "[错误：音频读取失败]";
+          this._emit("whenSTTReceived");
+        };
+        reader.readAsDataURL(audioBlob);
       };
 
       this.mediaRecorder.stop();
     }
 
-    _callSTT(apiKey, audioBlob) {
-      // Step 1: 申请上传策略
+    _callSTT(apiKey, audioDataURL) {
+      const body = {
+        model: "paraformer-v2",
+        input: {
+          audio: audioDataURL,
+        },
+      };
+
+      console.log("[百炼STT] 发送识别请求, audio前缀:", audioDataURL.substring(0, 50));
+
       Scratch.fetch(
-        "https://dashscope.aliyuncs.com/api/v1/uploads?model=paraformer-v2&filename=audio.webm",
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
           },
+          body: JSON.stringify(body),
         }
       )
         .then((r) => {
-          if (!r.ok) return r.text().then((t) => Promise.reject(t));
-          return r.json();
-        })
-        .then((uploadData) => {
-          const uploadUrl = uploadData.data.upload_url;
-          const audioUrl = uploadData.data.url;
-
-          // Step 2: PUT 上传音频文件
-          return Scratch.fetch(uploadUrl, {
-            method: "PUT",
-            headers: { "Content-Type": "audio/webm" },
-            body: audioBlob,
-          }).then(() => audioUrl);
-        })
-        .then((audioUrl) => {
-          // Step 3: 调用 ASR 识别
-          const body = {
-            model: "paraformer-v2",
-            input: { audio: audioUrl },
-          };
-
-          return Scratch.fetch(
-            "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
-            {
-              method: "POST",
-              headers: {
-                Authorization: `Bearer ${apiKey}`,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(body),
-            }
-          );
-        })
-        .then((r) => {
+          console.log("[百炼STT] 响应状态:", r.status);
           if (!r.ok) return r.text().then((t) => Promise.reject(t));
           return r.json();
         })
         .then((data) => {
+          console.log("[百炼STT] 响应数据:", JSON.stringify(data).substring(0, 500));
           const text =
             data.output &&
             data.output.results &&
@@ -292,6 +281,7 @@
           }
         })
         .catch((err) => {
+          console.error("[百炼STT] 错误:", err);
           this.lastSTT = `[识别失败：${err}]`;
         })
         .finally(() => this._emit("whenSTTReceived"));
