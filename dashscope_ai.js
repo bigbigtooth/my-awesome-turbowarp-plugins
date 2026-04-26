@@ -217,45 +217,31 @@
         const tracks = this.mediaRecorder.stream.getTracks();
         tracks.forEach((t) => t.stop());
 
-        const audioBlob = new Blob(this.audioChunks, { type: "audio/wav" });
+        const audioBlob = new Blob(this.audioChunks, { type: "audio/webm" });
         this.audioChunks = [];
 
-        const reader = new FileReader();
-        reader.onload = () => {
-          // data:audio/wav;base64,xxxxx
-          const dataURL = reader.result;
-          console.log("[百炼STT] 音频 dataURL 长度:", dataURL.length);
-          this._callSTT(apiKey, dataURL);
-        };
-        reader.onerror = () => {
-          this.lastSTT = "[错误：音频读取失败]";
-          this._emit("whenSTTReceived");
-        };
-        reader.readAsDataURL(audioBlob);
+        console.log("[百炼STT] 音频大小:", audioBlob.size, "类型:", audioBlob.type);
+        this._callSTT(apiKey, audioBlob);
       };
 
       this.mediaRecorder.stop();
     }
 
-    _callSTT(apiKey, audioDataURL) {
-      const body = {
-        model: "paraformer-v2",
-        input: {
-          audio: audioDataURL,
-        },
-      };
+    _callSTT(apiKey, audioBlob) {
+      const formData = new FormData();
+      formData.append("model", "paraformer-v2");
+      formData.append("file", audioBlob, "recording.webm");
 
-      console.log("[百炼STT] 发送识别请求, audio前缀:", audioDataURL.substring(0, 50));
+      console.log("[百炼STT] 使用 OpenAI 兼容接口发送识别请求");
 
       Scratch.fetch(
-        "https://dashscope.aliyuncs.com/api/v1/services/aigc/audio/asr",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
         {
           method: "POST",
           headers: {
             Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
           },
-          body: JSON.stringify(body),
+          body: formData,
         }
       )
         .then((r) => {
@@ -265,17 +251,8 @@
         })
         .then((data) => {
           console.log("[百炼STT] 响应数据:", JSON.stringify(data).substring(0, 500));
-          const text =
-            data.output &&
-            data.output.results &&
-            data.output.results[0] &&
-            data.output.results[0].transcription;
-          if (text) {
-            this.lastSTT = typeof text === "string"
-              ? text
-              : text.map((t) => t.text).join("");
-          } else if (data.output && data.output.text) {
-            this.lastSTT = data.output.text;
+          if (data.text) {
+            this.lastSTT = data.text;
           } else {
             this.lastSTT = "[错误：语音识别无结果]";
           }
