@@ -177,22 +177,28 @@
     whenSTTReceived() {}
 
     startRecording() {
+      console.log("[百炼STT] startRecording 被调用, 当前 isRecording:", this.isRecording);
       if (this.isRecording) return;
       this.audioChunks = [];
 
       navigator.mediaDevices
         .getUserMedia({ audio: true })
         .then((stream) => {
+          console.log("[百炼STT] getUserMedia 成功, stream tracks:", stream.getTracks().length);
           this.mediaRecorder = new MediaRecorder(stream, {
             mimeType: "audio/webm;codecs=opus",
           });
+          console.log("[百炼STT] MediaRecorder 创建成功, mimeType:", this.mediaRecorder.mimeType);
           this.mediaRecorder.ondataavailable = (e) => {
+            console.log("[百炼STT] ondataavailable, chunk size:", e.data.size);
             if (e.data.size > 0) this.audioChunks.push(e.data);
           };
           this.mediaRecorder.start();
           this.isRecording = true;
+          console.log("[百炼STT] 录音已开始, state:", this.mediaRecorder.state);
         })
         .catch((err) => {
+          console.error("[百炼STT] getUserMedia 失败:", err);
           this.lastSTT = `[录音失败：${err.message}]`;
           this._emit("whenSTTReceived");
         });
@@ -200,6 +206,8 @@
 
     stopRecordingAndRecognize(args) {
       const apiKey = args.KEY.trim();
+      console.log("[百炼STT] stopRecordingAndRecognize 被调用");
+      console.log("[百炼STT] isRecording:", this.isRecording, "mediaRecorder:", !!this.mediaRecorder, "apiKey长度:", apiKey.length);
 
       if (!this.isRecording || !this.mediaRecorder) {
         this.lastSTT = "[错误：未在录音中]";
@@ -216,14 +224,24 @@
         this.isRecording = false;
         const tracks = this.mediaRecorder.stream.getTracks();
         tracks.forEach((t) => t.stop());
+        console.log("[百炼STT] 录音已停止, audioChunks数量:", this.audioChunks.length);
 
         const audioBlob = new Blob(this.audioChunks, { type: "audio/webm" });
         this.audioChunks = [];
 
-        console.log("[百炼STT] 音频大小:", audioBlob.size, "类型:", audioBlob.type);
+        console.log("[百炼STT] 音频 Blob 大小:", audioBlob.size, "类型:", audioBlob.type);
+
+        if (audioBlob.size === 0) {
+          console.error("[百炼STT] 音频数据为空!");
+          this.lastSTT = "[错误：录音数据为空]";
+          this._emit("whenSTTReceived");
+          return;
+        }
+
         this._callSTT(apiKey, audioBlob);
       };
 
+      console.log("[百炼STT] 调用 mediaRecorder.stop(), 当前 state:", this.mediaRecorder.state);
       this.mediaRecorder.stop();
     }
 
@@ -232,37 +250,51 @@
       formData.append("model", "paraformer-v2");
       formData.append("file", audioBlob, "recording.webm");
 
-      console.log("[百炼STT] 使用原生 fetch + FormData 发送识别请求");
+      const url = "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions";
+      console.log("[百炼STT] ========== 开始发送识别请求 ==========");
+      console.log("[百炼STT] URL:", url);
+      console.log("[百炼STT] Method: POST");
       console.log("[百炼STT] audioBlob size:", audioBlob.size, "type:", audioBlob.type);
+      console.log("[百炼STT] FormData model: paraformer-v2");
+      console.log("[百炼STT] FormData file: recording.webm");
+      console.log("[百炼STT] Authorization: Bearer " + apiKey.substring(0, 8) + "...");
 
-      fetch(
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: formData,
-        }
-      )
+      fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: formData,
+      })
         .then((r) => {
-          console.log("[百炼STT] 响应状态:", r.status);
-          if (!r.ok) return r.text().then((t) => Promise.reject(t));
+          console.log("[百炼STT] 收到响应, 状态码:", r.status, "状态文本:", r.statusText);
+          console.log("[百炼STT] 响应头 Content-Type:", r.headers.get("content-type"));
+          if (!r.ok) {
+            return r.text().then((t) => {
+              console.error("[百炼STT] 错误响应体:", t);
+              return Promise.reject(t);
+            });
+          }
           return r.json();
         })
         .then((data) => {
-          console.log("[百炼STT] 响应数据:", JSON.stringify(data).substring(0, 500));
+          console.log("[百炼STT] 成功响应数据:", JSON.stringify(data));
           if (data.text) {
             this.lastSTT = data.text;
+            console.log("[百炼STT] 识别结果:", this.lastSTT);
           } else {
             this.lastSTT = "[错误：语音识别无结果]";
+            console.warn("[百炼STT] 响应中没有 text 字段");
           }
         })
         .catch((err) => {
-          console.error("[百炼STT] 错误:", err);
+          console.error("[百炼STT] 请求失败:", err);
           this.lastSTT = `[识别失败：${err}]`;
         })
-        .finally(() => this._emit("whenSTTReceived"));
+        .finally(() => {
+          console.log("[百炼STT] ========== 请求结束 ==========");
+          this._emit("whenSTTReceived");
+        });
     }
 
     getSTT() {
