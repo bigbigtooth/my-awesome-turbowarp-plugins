@@ -44,7 +44,7 @@
               KEY: { type: Scratch.ArgumentType.STRING, defaultValue: "" },
               MODEL: {
                 type: Scratch.ArgumentType.STRING,
-                defaultValue: "qwen-plus",
+                defaultValue: "qwen-flash",
               },
               QUESTION: {
                 type: Scratch.ArgumentType.STRING,
@@ -316,7 +316,7 @@
       if (!text) return;
 
       const body = {
-        model: "cosyvoice-v2",
+        model: "cosyvoice-v3.5-flash",
         input: { text: text },
         parameters: {
           voice: "longxiaochun",
